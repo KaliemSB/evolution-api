@@ -23,6 +23,19 @@ const getTypeMessage = (msg: any) => {
       msg?.message?.viewOnceMessageV2?.message?.audioMessage?.url,
     listResponseMessage: msg?.message?.listResponseMessage?.title || msg?.listResponseMessage?.title,
     responseRowId: msg?.message?.listResponseMessage?.singleSelectReply?.selectedRowId,
+    // Native flow replies (buttons/lists sent as interactiveMessage.nativeFlowMessage):
+    // single_select replies carry title (mirrors listResponseMessage), quick_reply replies carry id
+    // (mirrors buttonsResponseMessage.selectedButtonId).
+    interactiveResponseMessage: (() => {
+      const paramsJson = msg?.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;
+      if (!paramsJson) return undefined;
+      try {
+        const params = JSON.parse(paramsJson);
+        return params?.title || params?.id || params?.display_text;
+      } catch {
+        return undefined;
+      }
+    })(),
     templateButtonReplyMessage:
       msg?.message?.templateButtonReplyMessage?.selectedId || msg?.message?.buttonsResponseMessage?.selectedButtonId,
     // Medias

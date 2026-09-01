@@ -2127,6 +2127,70 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
+  // Interactive (native flow) messages are silently dropped by modern WhatsApp clients
+  // unless the relay stanza carries the binary nodes the official client emits.
+  // Node shapes mirror itsukichan's getButtonArgs (via baileys_helper).
+  private getInteractiveNodes(sender: string, message: any): any[] | undefined {
+    // Classic lists: biz > list(product_list, v2), no bot node (mirrors whaileys/itsukichan).
+    if (message?.listMessage) {
+      return [{ tag: 'biz', attrs: {}, content: [{ tag: 'list', attrs: { type: 'product_list', v: '2' } }] }];
+    }
+
+    const nativeFlow =
+      message?.viewOnceMessage?.message?.interactiveMessage?.nativeFlowMessage ||
+      message?.interactiveMessage?.nativeFlowMessage;
+    if (!nativeFlow) return undefined;
+
+    const firstButtonName = nativeFlow.buttons?.[0]?.name;
+    const specials = [
+      'mpm',
+      'cta_catalog',
+      'send_location',
+      'call_permission_request',
+      'wa_payment_transaction_details',
+      'automated_greeting_message_view_catalog',
+    ];
+
+    let bizNode: any;
+    if (firstButtonName === 'review_and_pay' || firstButtonName === 'payment_info') {
+      bizNode = {
+        tag: 'biz',
+        attrs: { native_flow_name: firstButtonName === 'review_and_pay' ? 'order_details' : firstButtonName },
+      };
+    } else if (specials.includes(firstButtonName)) {
+      bizNode = {
+        tag: 'biz',
+        attrs: {},
+        content: [
+          {
+            tag: 'interactive',
+            attrs: { type: 'native_flow', v: '1' },
+            content: [{ tag: 'native_flow', attrs: { v: '2', name: firstButtonName } }],
+          },
+        ],
+      };
+    } else {
+      bizNode = {
+        tag: 'biz',
+        attrs: {},
+        content: [
+          {
+            tag: 'interactive',
+            attrs: { type: 'native_flow', v: '1' },
+            content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }],
+          },
+        ],
+      };
+    }
+
+    const nodes: any[] = [bizNode];
+    if (!isJidGroup(sender)) {
+      nodes.push({ tag: 'bot', attrs: { biz_bot: '1' } });
+    }
+
+    return nodes;
+  }
+
   private async sendMessage(
     sender: string,
     message: any,
@@ -2155,14 +2219,17 @@ export class BaileysStartupService extends ChannelStartupService {
     // NOTE: NÃO DEVEMOS GERAR O messageId AQUI, SOMENTE SE VIER INFORMADO POR PARAMETRO. A GERAÇÃO ANTERIOR IMPEDE O WZAP DE IDENTIFICAR A SOURCE.
     if (messageId) option.messageId = messageId;
 
-    if (message['viewOnceMessage']) {
+    if (message['viewOnceMessage'] || message['interactiveMessage'] || message['listMessage']) {
       const m = generateWAMessageFromContent(sender, message, {
         timestamp: new Date(),
         userJid: this.instance.wuid,
         messageId,
         quoted,
       });
-      const id = await this.client.relayMessage(sender, message, { messageId });
+      const id = await this.client.relayMessage(sender, message, {
+        messageId,
+        additionalNodes: this.getInteractiveNodes(sender, message),
+      });
       m.key = { id: id, remoteJid: sender, participant: isPnUser(sender) ? sender : undefined, fromMe: true };
       for (const [key, value] of Object.entries(m)) {
         if (!value || (isArray(value) && value.length) === 0) {
@@ -3434,6 +3501,10 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async listMessage(data: SendListDto) {
+    // Lists still render as classic proto.listMessage, but only when the relay stanza
+    // carries the biz > list(product_list, v2) node and listType is SINGLE_SELECT —
+    // the previous PRODUCT_LIST listType never renders for regular lists.
+    // (Native flow single_select does not render from regular accounts.)
     return await this.sendMessageWithTyping(
       data.number,
       {
@@ -3443,7 +3514,7 @@ export class BaileysStartupService extends ChannelStartupService {
           buttonText: data?.buttonText,
           footerText: data?.footerText,
           sections: data.sections,
-          listType: 2,
+          listType: proto.Message.ListMessage.ListType.SINGLE_SELECT,
         },
       },
       {
@@ -4685,6 +4756,14 @@ export class BaileysStartupService extends ChannelStartupService {
       messageRaw.messageType = 'documentMessage';
       messageRaw.message.documentMessage = messageRaw.message.documentWithCaptionMessage.message.documentMessage;
       delete messageRaw.message.documentWithCaptionMessage;
+    }
+
+    // Button sends are viewOnceMessage-wrapped interactiveMessages; unwrap so consumers
+    // (Chatwoot, webhooks, chatbots) see messageType 'interactiveMessage' instead of 'viewOnceMessage'.
+    if (messageRaw.message.viewOnceMessage?.message?.interactiveMessage) {
+      messageRaw.messageType = 'interactiveMessage';
+      messageRaw.message.interactiveMessage = messageRaw.message.viewOnceMessage.message.interactiveMessage;
+      delete messageRaw.message.viewOnceMessage;
     }
 
     const quotedMessage = messageRaw?.contextInfo?.quotedMessage;

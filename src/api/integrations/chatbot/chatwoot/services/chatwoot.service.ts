@@ -1774,6 +1774,7 @@ export class ChatwootService {
       liveLocationMessage: msg.liveLocationMessage,
       listMessage: msg.listMessage,
       listResponseMessage: msg.listResponseMessage,
+      interactiveResponseMessage: msg.interactiveResponseMessage,
       viewOnceMessageV2:
         msg?.message?.viewOnceMessageV2?.message?.imageMessage?.url ||
         msg?.message?.viewOnceMessageV2?.message?.videoMessage?.url ||
@@ -1934,6 +1935,16 @@ export class ChatwootService {
         '_ID_: ' +
         responseRowId;
       return formattedResponseList;
+    }
+
+    if (typeKey === 'interactiveResponseMessage') {
+      const paramsJson = result?.nativeFlowResponseMessage?.paramsJson;
+      try {
+        const params = JSON.parse(paramsJson);
+        return params?.title || params?.display_text || params?.id;
+      } catch {
+        return paramsJson;
+      }
     }
 
     return result;
@@ -2167,14 +2178,25 @@ export class ChatwootService {
         }
 
         if (isInteractiveButtonMessage) {
-          const buttons = body.message.interactiveMessage.nativeFlowMessage.buttons;
+          const interactive = body.message.interactiveMessage;
+          const buttons = interactive.nativeFlowMessage.buttons;
           this.logger.info('is Interactive Button Message: ' + JSON.stringify(buttons));
 
-          for (const button of buttons) {
-            const buttonParams = JSON.parse(button.buttonParamsJson);
-            const paymentSettings = buttonParams.payment_settings;
+          const parseParams = (json: string) => {
+            try {
+              return JSON.parse(json);
+            } catch {
+              return {};
+            }
+          };
 
-            if (button.name === 'payment_info' && paymentSettings[0].type === 'pix_static_code') {
+          let content: string;
+          const pixButton = buttons.find((button) => button.name === 'payment_info');
+
+          if (pixButton) {
+            const paymentSettings = parseParams(pixButton.buttonParamsJson).payment_settings;
+
+            if (paymentSettings?.[0]?.type === 'pix_static_code') {
               const pixSettings = paymentSettings[0].pix_static_code;
               const pixKeyType = (() => {
                 switch (pixSettings.key_type) {
@@ -2189,23 +2211,40 @@ export class ChatwootService {
                 }
               })();
               const pixKey = pixSettings.key_type === 'PHONE' ? pixSettings.key.replace('+55', '') : pixSettings.key;
-              const content = `*${pixSettings.merchant_name}*\nChave PIX: ${pixKey} (${pixKeyType})`;
-
-              const send = await this.createMessage(
-                instance,
-                getConversation,
-                content,
-                messageType,
-                false,
-                [],
-                body,
-                'WAID:' + body.key.id,
-                quotedMsg,
-              );
-              if (!send) this.logger.warn('message not sent');
-            } else {
-              this.logger.warn('Interactive Button Message not mapped');
+              content = `*${pixSettings.merchant_name}*\nChave PIX: ${pixKey} (${pixKeyType})`;
             }
+          } else {
+            const labels = buttons
+              .map((button) => {
+                const params = parseParams(button.buttonParamsJson);
+                return params.display_text || params.title;
+              })
+              .filter(Boolean);
+
+            content = [
+              interactive.body?.text,
+              labels.map((label) => `▪️ ${label}`).join('\n'),
+              interactive.footer?.text,
+            ]
+              .filter(Boolean)
+              .join('\n\n');
+          }
+
+          if (content) {
+            const send = await this.createMessage(
+              instance,
+              getConversation,
+              content,
+              messageType,
+              false,
+              [],
+              body,
+              'WAID:' + body.key.id,
+              quotedMsg,
+            );
+            if (!send) this.logger.warn('message not sent');
+          } else {
+            this.logger.warn('Interactive Button Message not mapped');
           }
           return;
         }
